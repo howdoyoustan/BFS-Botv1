@@ -30,6 +30,10 @@ from graph.nodes.de.hallucination import de_hallucination_node
 from graph.nodes.de.retry_generate import de_retry_generate_node
 from graph.nodes.de.improve_kb import de_improve_kb_node
 
+# SN nodes
+from graph.nodes.sn.retrieve import sn_retrieve_node
+from graph.nodes.sn.generate import sn_generate_node
+
 # DE routers
 from graph.routers.de_router import de_decide_next_step
 
@@ -58,6 +62,10 @@ def build_workflow():
     workflow.add_node("gt_store_tribal", gt_store_tribal_node)
     workflow.add_node("gt_post_sufficiency", gt_post_sufficiency_node)
 
+    # SN
+    workflow.add_node("sn_retrieve", sn_retrieve_node)
+    workflow.add_node("sn_generate", sn_generate_node)
+
     # DE
     workflow.add_node("de_context_router", de_context_router_node)
     workflow.add_node("de_retrieve", de_retrieve_node)
@@ -78,25 +86,27 @@ def build_workflow():
     # -------------------------------------------------
 
     workflow.add_conditional_edges(
-    "intent_router",
-    lambda state: state["intent"],
-    {
-        "SOP_QUERY": "sop_retrieve",
-        "DATA_ENGINEERING": "de_context_router",
-        "TROUBLESHOOTING": "gt_retrieve",
-        "AMBIGUOUS": "intent_llm_disambiguation",
-    },
-)
+        "intent_router",
+        lambda state: state["intent"],
+        {
+            "SOP_QUERY": "sop_retrieve",
+            "DATA_ENGINEERING": "de_context_router",
+            "TROUBLESHOOTING": "gt_retrieve",
+            "SERVICENOW_INCIDENT": "sn_retrieve",
+            "AMBIGUOUS": "intent_llm_disambiguation",
+        },
+    )
 
     workflow.add_conditional_edges(
-    "intent_llm_disambiguation",
-    lambda state: state["intent"],
-    {
-        "SOP_QUERY": "sop_retrieve",
-        "DATA_ENGINEERING": "de_context_router",
-        "TROUBLESHOOTING": "gt_retrieve",
-    },
-)
+        "intent_llm_disambiguation",
+        lambda state: state["intent"],
+        {
+            "SOP_QUERY": "sop_retrieve",
+            "DATA_ENGINEERING": "de_context_router",
+            "TROUBLESHOOTING": "gt_retrieve",
+            "SERVICENOW_INCIDENT": "sn_retrieve",
+        },
+    )
 
 
     # -------------------------------------------------
@@ -111,7 +121,7 @@ def build_workflow():
     # GT CHAIN (generic troubleshooting)
     # -------------------------------------------------
 
-    # Step 1: retrieve → relevance
+    # Step 1: retrieve -> relevance
     workflow.add_edge("gt_retrieve", "gt_relevance")
 
     # Step 2: relevance decision
@@ -126,7 +136,7 @@ def build_workflow():
         },
     )
 
-    # Step 3: external search → generate (LLM fallback)
+    # Step 3: external search -> generate (LLM fallback)
     workflow.add_edge("gt_external_search", "gt_generate")
 
     # Step 4: ALWAYS check sufficiency after generate
@@ -165,6 +175,13 @@ def build_workflow():
 
     workflow.add_edge("gt_store_tribal", END)
 
+
+    # -------------------------------------------------
+    # SN CHAIN (deterministic ServiceNow retrieval)
+    # -------------------------------------------------
+
+    workflow.add_edge("sn_retrieve", "sn_generate")
+    workflow.add_edge("sn_generate", END)
 
     # -------------------------------------------------
     # DE CHAIN (strict, evidence-based)

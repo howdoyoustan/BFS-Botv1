@@ -17,4 +17,6 @@ class GraphState(TypedDict):
     kb_retry_count: int
     kb_enriched: bool
 
+    sn_incidents: List[dict]
+
     steps: Annotated[List[str], operator.add]

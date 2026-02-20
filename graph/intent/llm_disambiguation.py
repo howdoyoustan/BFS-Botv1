@@ -9,7 +9,8 @@ INTENT_PROMPT = ChatPromptTemplate.from_messages([
         "Choose EXACTLY ONE intent:\n"
         "- SOP_QUERY (procedures, onboarding, runbooks)\n"
         "- TROUBLESHOOTING (generic system or OS issues)\n"
-        "- DATA_ENGINEERING (Spark, Airflow, pipelines, schemas)\n\n"
+        "- DATA_ENGINEERING (Spark, Airflow, pipelines, schemas)\n"
+        "- SERVICENOW_INCIDENT (incident lookup, ticket search, work notes, ServiceNow queries)\n\n"
         "Return ONLY the intent label."
     ),
     ("human", "{question}")
@@ -30,6 +31,7 @@ def llm_intent_disambiguation_node(state):
         "SOP_QUERY",
         "TROUBLESHOOTING",
         "DATA_ENGINEERING",
+        "SERVICENOW_INCIDENT",
     }:
         raise ValueError(f"LLM returned invalid intent: {intent}")
 

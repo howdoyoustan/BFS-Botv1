@@ -19,7 +19,7 @@ def sop_generate_node(state):
 
     if not docs:
         return {
-            "generation": "I don't know – no SOP exists for this procedure.",
+            "generation": "I don't know \u2013 no SOP exists for this procedure.",
             "steps": ["sop_generate:no_docs"]
         }
 

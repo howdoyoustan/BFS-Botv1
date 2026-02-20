@@ -7,7 +7,7 @@ def sop_relevance_node(state):
             "steps": ["sop_relevance:no_docs"]
         }
 
-    # SOPs are high-signal → retrieval hit is usually enough
+    # SOPs are high-signal -> retrieval hit is usually enough
     return {
         "is_relevant": "yes",
         "steps": ["sop_relevance:yes"]

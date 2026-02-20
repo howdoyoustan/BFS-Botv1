@@ -1,0 +1,6 @@
+Eventually add confidence-based intent scoring 
+Intent Router
+ ├─ QuestionTypeClassifier (rules)
+ ├─ DomainClassifier (rules)
+ ├─ Policy Resolver (deterministic)
+ └─ LLM Disambiguator (only if still unclear)
