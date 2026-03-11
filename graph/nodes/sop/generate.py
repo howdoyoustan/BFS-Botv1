@@ -6,39 +6,45 @@ SYSTEM_PROMPT = """
 You are an SOP assistant.
 
 Rules:
-- Answer ONLY using the provided SOP context.
-- If the SOP does not contain the answer, respond EXACTLY with:
-  "I don't know - no SOP exists for this procedure."
-- Do NOT add steps.
-- Do NOT infer missing actions.
-- Use bullet points if steps exist.
+- Answer using the provided SOP context. Extract and synthesize relevant steps, procedures, or guidance.
+- If the context contains related information (e.g., platform restoration, recovery actions, triage steps, routing) that addresses the user's topic, present it clearly. The user may phrase their question differently than the SOP; look for semantic overlap.
+- Use bullet points when presenting steps.
+- Do NOT invent steps or actions not present in the context.
+- Only respond with "I don't know - no SOP exists for this procedure." if the context is completely unrelated to the question (e.g., different domain, no overlapping concepts).
 """
+
 
 def sop_generate_node(state):
     docs = state.get("documents", [])
 
     if not docs:
         return {
-            "generation": "I don't know \u2013 no SOP exists for this procedure.",
-            "steps": ["sop_generate:no_docs"]
+            "generation": "I don't know – no SOP exists for this procedure.",
+            "steps": ["sop_generate:no_docs"],
         }
 
     context = "\n\n".join(d.page_content for d in docs)
+    question = state["question"]
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", SYSTEM_PROMPT),
-        ("human", "SOP Context:\n{context}\n\nQuestion:\n{question}")
+        ("human", "SOP Context:\n{context}\n\nQuestion:\n{question}"),
     ])
 
     llm = get_llm()
     chain = prompt | llm | StrOutputParser()
 
-    answer = chain.invoke({
-        "context": context,
-        "question": state["question"]
-    })
+    answer = chain.invoke({"context": context, "question": question})
+
+    # Debug: surface what was passed to the LLM (truncated for readability)
+    ctx_preview = context[:400].replace("\n", " ") + ("..." if len(context) > 400 else "")
+    steps = [
+        "sop_generate",
+        f"sop_ctx_preview: {ctx_preview}",
+        f"sop_question: {question}",
+    ]
 
     return {
         "generation": answer,
-        "steps": ["sop_generate"]
+        "steps": steps,
     }

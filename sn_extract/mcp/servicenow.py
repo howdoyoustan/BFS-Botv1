@@ -203,64 +203,6 @@ class ServiceNowClient:
         resp.raise_for_status()
         return resp.json().get("result", {})
 
-    def append_work_notes(self, sys_id: str, text: str) -> dict:
-        """Append work notes to an incident. ServiceNow journals the update."""
-        return self.update_incident(sys_id, {"work_notes": text})
-
-    # Standard impact/urgency → priority matrix (ServiceNow calculates priority from these)
-    PRIORITY_TO_IMPACT_URGENCY = {
-        "1": ("1", "1"),   # P1 Critical: impact=1, urgency=1
-        "2": ("1", "2"),   # P2 High: impact=1, urgency=2
-        "3": ("2", "2"),   # P3 Moderate: impact=2, urgency=2
-        "4": ("2", "3"),   # P4 Low: impact=2, urgency=3
-        "5": ("3", "3"),   # P5 Planning: impact=3, urgency=3
-    }
-
-    def escalate_incident(self, sys_id: str, target_priority: str) -> dict:
-        """
-        Escalate incident by setting impact and urgency.
-        ServiceNow calculates priority from impact+urgency; direct priority PATCH is ignored.
-        target_priority: "1" (Critical) through "5" (Planning).
-        """
-        mapping = self.PRIORITY_TO_IMPACT_URGENCY.get(str(target_priority))
-        if not mapping:
-            raise ValueError(f"Invalid target priority: {target_priority}. Use 1-5.")
-        impact, urgency = mapping
-        return self.update_incident(sys_id, {"impact": impact, "urgency": urgency})
-
-    def link_incidents(self, child_sys_id: str, parent_sys_id: str) -> dict:
-        """Link child incident to parent via parent_incident field."""
-        return self.update_incident(child_sys_id, {"parent_incident": parent_sys_id})
-
-    def get_user_sys_id(self, user_name: str) -> Optional[str]:
-        """Look up user sys_id by user_name (LIKE match)."""
-        params = {
-            "sysparm_query": f"user_nameLIKE{user_name}",
-            "sysparm_fields": "sys_id",
-            "sysparm_limit": 1,
-        }
-        try:
-            resp = self._get("/api/now/table/sys_user", params)
-            results = resp.json().get("result", [])
-            return results[0]["sys_id"] if results else None
-        except Exception:
-            return None
-
-    def get_group_sys_id(self, group_name: str) -> Optional[str]:
-        """Look up group sys_id by name (LIKE match)."""
-        escaped = group_name.replace("^", "^^").replace(":", "^:")
-        params = {
-            "sysparm_query": f"nameLIKE{escaped}",
-            "sysparm_fields": "sys_id",
-            "sysparm_limit": 1,
-        }
-        try:
-            resp = self._get("/api/now/table/sys_user_group", params)
-            results = resp.json().get("result", [])
-            return results[0]["sys_id"] if results else None
-        except Exception:
-            return None
-
     def create_incident(self, fields: dict) -> dict:
         """Create a new incident. Returns the created record."""
         url = f"{self.base_url}/api/now/table/incident"
