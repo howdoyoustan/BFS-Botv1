@@ -944,10 +944,32 @@ def generate_all_incidents() -> list[dict]:
     return all_incidents[:100]
 
 
+# Assignment groups for triage queries (e.g. "Find incidents assigned to Software team")
+# Maps category -> group name for lookup. Groups must exist in ServiceNow (create via seed_incidents_sop or manually).
+CATEGORY_TO_GROUP = {
+    "Software": "Software",
+    "Database": "Data Engineering",
+    "Network": "Infrastructure",
+}
+
+
 def push_to_servicenow(incidents: list[dict]):
     client = ServiceNowClient()
     created = []
     failed = []
+
+    # Build group lookup so "Find incidents assigned to Software team" returns results
+    # Creates groups if they don't exist (requires admin/write on sys_user_group)
+    group_lookup = {}
+    for grp_name in ["Software", "Data Engineering", "Infrastructure", "Network"]:
+        try:
+            sid = client.get_or_create_group(grp_name)
+            if sid:
+                group_lookup[grp_name] = sid
+        except Exception:
+            pass
+    if group_lookup:
+        print(f"  Assignment groups: {list(group_lookup.keys())}")
 
     print(f"\nPushing {len(incidents)} incidents to ServiceNow...\n")
 
@@ -961,6 +983,11 @@ def push_to_servicenow(incidents: list[dict]):
             "category": inc.get("category", "Software"),
             "state": "1",
         }
+
+        # Assign to group so "assigned to Software team" etc. returns results
+        grp_name = inc.get("assignment_group_name") or CATEGORY_TO_GROUP.get(inc.get("category", "Software"))
+        if grp_name and grp_name in group_lookup:
+            payload["assignment_group"] = group_lookup[grp_name]
 
         try:
             result = client.create_incident(payload)

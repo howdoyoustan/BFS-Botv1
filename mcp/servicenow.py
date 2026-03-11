@@ -261,6 +261,22 @@ class ServiceNowClient:
         except Exception:
             return None
 
+    def get_or_create_group(self, group_name: str) -> Optional[str]:
+        """Get group sys_id by name; create if not exists. Returns None on failure."""
+        sid = self.get_group_sys_id(group_name)
+        if sid:
+            return sid
+        try:
+            url = f"{self.base_url}/api/now/table/sys_user_group"
+            resp = requests.post(
+                url, auth=self.auth, headers=self.headers,
+                json={"name": group_name}, timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json().get("result", {}).get("sys_id")
+        except Exception:
+            return None
+
     def create_incident(self, fields: dict) -> dict:
         """Create a new incident. Returns the created record."""
         url = f"{self.base_url}/api/now/table/incident"

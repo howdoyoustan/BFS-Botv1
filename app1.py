@@ -34,37 +34,6 @@ if "sn_ui_phase" not in st.session_state:
 if "_pending_synthetic" not in st.session_state:
     st.session_state._pending_synthetic = None
 
-
-def queue_user_prompt(text: str, *, pending_payload: str | None = None):
-    """Queue a synthetic user prompt and rerun the app."""
-    st.session_state.messages.append({"role": "user", "content": text})
-    st.session_state._pending_synthetic = pending_payload or text
-    st.rerun()
-
-
-def _get_current_incident_context() -> str | None:
-    """Best-effort current incident number from session state or recent responses."""
-    sn_sess = st.session_state.get("sn_session") or {}
-    pending = sn_sess.get("pending_action") or {}
-
-    if pending.get("incident_number"):
-        return pending["incident_number"]
-
-    snapshot = pending.get("incident_snapshot") or {}
-    if snapshot.get("number"):
-        return snapshot["number"]
-
-    for msg in reversed(st.session_state.get("messages", [])):
-        sn_resp = msg.get("sn_response") if isinstance(msg, dict) else None
-        if not sn_resp:
-            continue
-        inc = sn_resp.get("incident") or {}
-        if inc.get("number"):
-            return inc["number"]
-
-    return None
-
-
 # ── Build graph (cached) ────────────────────────────────────────────
 
 @st.cache_resource
@@ -94,50 +63,6 @@ INTENT_LABELS = {
 with st.sidebar:
     st.title("BFS Bot v2")
     st.caption("Cross-Functional Incident Triage")
-
-    st.divider()
-
-    st.subheader("Quick Start")
-    st.caption("Use one-click prompts to navigate common triage workflows.")
-
-    if st.button("🔎 Show open P1/P2 incidents", width="stretch"):
-        queue_user_prompt("Show me all open P1 and P2 incidents")
-    if st.button("🧾 Lookup incident by number", width="stretch"):
-        queue_user_prompt("Show details for INC0010001")
-    if st.button("📚 Ask SOP question", width="stretch"):
-        queue_user_prompt("What SOP should I follow for a VPN outage?")
-
-    st.divider()
-
-    st.subheader("Session Status")
-    phase_labels = {
-        None: "Idle",
-        "showing_filters": "Filtering incidents",
-        "showing_list": "Reviewing incident list",
-        "showing_detail": "Viewing incident details",
-        "awaiting_confirmation": "Waiting for action confirmation",
-    }
-    st.caption(f"Current SN phase: **{phase_labels.get(st.session_state.sn_ui_phase, 'Idle')}**")
-    st.caption(f"Messages in chat: **{len(st.session_state.messages)}**")
-
-    st.divider()
-
-    st.subheader("Current Context")
-    current_incident = _get_current_incident_context()
-    sn_sess = st.session_state.get("sn_session") or {}
-    pending_action = sn_sess.get("pending_action") or {}
-    if current_incident:
-        st.caption(f"Incident: **{current_incident}**")
-    else:
-        st.caption("Incident: _None selected yet_")
-
-    if pending_action.get("type"):
-        st.caption(f"Pending action: **{pending_action['type']}**")
-    else:
-        st.caption("Pending action: _None_")
-
-    if sn_sess.get("awaiting"):
-        st.caption(f"Awaiting: **{sn_sess['awaiting']}**")
 
     st.divider()
 
@@ -232,20 +157,23 @@ with st.sidebar:
 
 def inject_selection(text: str):
     """Treat a widget click as if the user typed a message."""
-    queue_user_prompt(text)
+    st.session_state.messages.append({"role": "user", "content": text})
+    st.session_state._pending_synthetic = text
+    st.rerun()
 
 
 def inject_incident_lookup(inc_number: str):
     """Direct incident lookup — bypasses the full graph."""
-    queue_user_prompt(
-        f"Show details for {inc_number}",
-        pending_payload=f"__direct_lookup__:{inc_number}",
-    )
+    st.session_state.messages.append({"role": "user", "content": f"Show details for {inc_number}"})
+    st.session_state._pending_synthetic = f"__direct_lookup__:{inc_number}"
+    st.rerun()
 
 
 def inject_action(inc_number: str, action: str):
     """Trigger an incident action (e.g. acknowledge, resolve) — runs through the graph."""
-    queue_user_prompt(f"{action} {inc_number}")
+    st.session_state.messages.append({"role": "user", "content": f"{action} {inc_number}"})
+    st.session_state._pending_synthetic = f"{action} {inc_number}"
+    st.rerun()
 
 
 def _update_pending_resolve(notes: str, close_code: str | None = None):
@@ -275,17 +203,6 @@ def _update_pending_escalate(target_priority: str):
     if pending:
         pending["target_priority"] = target_priority
         st.session_state.sn_session = sn_sess
-
-
-# ── Helpers for ServiceNow reference/choice fields ─────────────────
-
-def _format_ref_value(val):
-    """Extract display string from ServiceNow reference/choice field (can be str or dict)."""
-    if val is None:
-        return "N/A"
-    if isinstance(val, dict):
-        return val.get("display_value", str(val))
-    return str(val) if val else "N/A"
 
 
 # ── Interactive SN response renderer ────────────────────────────────
@@ -352,10 +269,8 @@ def _render_disambiguation(response: dict, msg_idx: int):
             inject_selection("just show me the results")
     with cols[1]:
         if st.button("Start over", key=f"start_over_{msg_idx}", width="stretch"):
-            st.session_state.messages = []
             st.session_state.sn_session = None
             st.session_state.sn_ui_phase = None
-            st.session_state._pending_synthetic = None
             st.rerun()
 
 
@@ -417,7 +332,7 @@ def _render_incident_list(response: dict, msg_idx: int):
     rcols = st.columns(3)
     with rcols[0]:
         if st.button("Refine filters", key=f"refine_{msg_idx}", width="stretch"):
-            queue_user_prompt("Refine filters", pending_payload="__refine_filters__")
+            inject_selection("I want to narrow down these results")
     with rcols[1]:
         if st.button("Not about incidents", key=f"not_inc_{msg_idx}", width="stretch"):
             st.session_state.sn_session = None
@@ -425,10 +340,8 @@ def _render_incident_list(response: dict, msg_idx: int):
             st.rerun()
     with rcols[2]:
         if st.button("Start over", key=f"restart_{msg_idx}", width="stretch"):
-            st.session_state.messages = []
             st.session_state.sn_session = None
             st.session_state.sn_ui_phase = None
-            st.session_state._pending_synthetic = None
             st.rerun()
 
 
@@ -478,15 +391,15 @@ def _render_single_incident(response: dict, msg_idx: int):
     st.markdown(f"## Incident {inc.get('number', 'N/A')}")
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Priority", _format_ref_value(inc.get("priority")))
-    col2.metric("State", _format_ref_value(inc.get("state")))
-    col3.metric("Impact", _format_ref_value(inc.get("impact")))
-    col4.metric("Urgency", _format_ref_value(inc.get("urgency")))
+    col1.metric("Priority", inc.get("priority", "N/A"))
+    col2.metric("State", inc.get("state", "N/A"))
+    col3.metric("Impact", inc.get("impact", "N/A"))
+    col4.metric("Urgency", inc.get("urgency", "N/A"))
 
     st.markdown(f"**Short Description:** {inc.get('short_description', 'N/A')}")
-    st.markdown(f"**Category:** {_format_ref_value(inc.get('category'))}")
-    st.markdown(f"**Assigned To:** {_format_ref_value(inc.get('assigned_to'))}")
-    st.markdown(f"**Assignment Group:** {_format_ref_value(inc.get('assignment_group'))}")
+    st.markdown(f"**Category:** {inc.get('category', 'N/A')}")
+    st.markdown(f"**Assigned To:** {inc.get('assigned_to', 'N/A')}")
+    st.markdown(f"**Assignment Group:** {inc.get('assignment_group', 'N/A')}")
     st.markdown(f"**Opened:** {inc.get('opened_at', 'N/A')}  |  **Resolved:** {inc.get('resolved_at', 'N/A')}")
 
     desc = inc.get("description", "") or "N/A"
@@ -542,11 +455,6 @@ def _render_action_confirm(response: dict, msg_idx: int):
 
     st.markdown(f"### {action_label}")
 
-    if requires_close_notes or requires_work_notes or requires_escalate_target:
-        st.info("**Action wizard**\n1. Review incident + planned changes\n2. Fill in required details\n3. Confirm to execute")
-    else:
-        st.info("**Action wizard**\n1. Review incident + planned changes\n2. Confirm to execute")
-
     if inc:
         col1, col2, col3 = st.columns(3)
         col1.metric("Incident", inc.get("number", "N/A"))
@@ -555,9 +463,9 @@ def _render_action_confirm(response: dict, msg_idx: int):
 
         st.markdown(f"**Description:** {inc.get('short_description', 'N/A')}")
         if inc.get("assigned_to"):
-            st.markdown(f"**Currently Assigned To:** {_format_ref_value(inc['assigned_to'])}")
+            st.markdown(f"**Currently Assigned To:** {inc['assigned_to']}")
         if inc.get("assignment_group"):
-            st.markdown(f"**Assignment Group:** {_format_ref_value(inc['assignment_group'])}")
+            st.markdown(f"**Assignment Group:** {inc['assignment_group']}")
 
     st.divider()
     st.markdown(action_desc)
@@ -673,7 +581,9 @@ def _render_action_confirm(response: dict, msg_idx: int):
             key=f"cancel_action_{msg_idx}",
             width="stretch",
         ):
-            queue_user_prompt("Cancel", pending_payload="__cancel_sn_action__")
+            st.session_state.messages.append({"role": "user", "content": "Cancel"})
+            st.session_state._pending_synthetic = "__cancel_sn_action__"
+            st.rerun()
 
 
 def _render_action_result(response: dict, msg_idx: int):
@@ -685,30 +595,25 @@ def _render_action_result(response: dict, msg_idx: int):
         st.success(response.get("text", "Action completed successfully."))
         if inc:
             col1, col2, col3 = st.columns(3)
-            col1.metric("Incident", _format_ref_value(inc.get("number")))
-            col2.metric("New State", _format_ref_value(inc.get("state")))
-            col3.metric("Priority", _format_ref_value(inc.get("priority")))
+            col1.metric("Incident", inc.get("number", "N/A"))
+            col2.metric("New State", inc.get("state", "N/A"))
+            col3.metric("Priority", inc.get("priority", "N/A"))
             if inc.get("short_description"):
                 st.markdown(f"**Description:** {inc['short_description']}")
 
-        # Post-action options (same layout as "Not what you're looking for?")
+        # Post-action options
         st.divider()
-        st.caption("What would you like to do next?")
         inc_number = inc.get("number", "")
-        pcols = st.columns(3)
-        with pcols[0]:
-            if st.button("Show other open incidents", key=f"post_show_{msg_idx}", width="stretch"):
+        options = ["Show other open incidents", "View full details", "Start fresh"]
+        selected = st.pills("What would you like to do next?", options, key=f"post_action_{msg_idx}")
+        if selected:
+            if selected == "Show other open incidents":
                 inject_selection("show open incidents")
-        with pcols[1]:
-            if st.button("View full details", key=f"post_view_{msg_idx}_{inc_number}", width="stretch"):
-                if inc_number:
-                    inject_incident_lookup(inc_number)
-        with pcols[2]:
-            if st.button("Start fresh", key=f"post_fresh_{msg_idx}", width="stretch"):
-                st.session_state.messages = []
+            elif selected == "View full details" and inc_number:
+                inject_incident_lookup(inc_number)
+            elif selected == "Start fresh":
                 st.session_state.sn_session = None
                 st.session_state.sn_ui_phase = None
-                st.session_state._pending_synthetic = None
                 st.rerun()
     else:
         st.error(response.get("text", "Action failed."))
@@ -751,26 +656,6 @@ def do_direct_lookup(inc_number: str):
 # ── Main chat area ───────────────────────────────────────────────────
 
 st.header("Incident Triage Assistant")
-
-if not st.session_state.messages:
-    with st.container(border=True):
-        st.markdown("### 👋 Start here")
-        st.caption("Pick a starter prompt or type your own question below.")
-
-        starter_prompts = [
-            "Show me open P1 and P2 incidents",
-            "Show details for INC0010699",
-            "Find incidents assigned to Data Engineering",
-            "Add a work note to INC0010699",
-            "What SOP should I follow for a VPN outage?",
-        ]
-
-        for row_start in range(0, len(starter_prompts), 2):
-            cols = st.columns(2)
-            for idx, prompt_text in enumerate(starter_prompts[row_start:row_start + 2]):
-                with cols[idx]:
-                    if st.button(prompt_text, key=f"welcome_prompt_{row_start}_{idx}", width="stretch"):
-                        queue_user_prompt(prompt_text)
 
 for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
@@ -885,17 +770,6 @@ if pending:
         }
         st.session_state.messages.append(msg_data)
         st.session_state.sn_ui_phase = "showing_detail"
-        st.rerun()
-    elif pending == "__refine_filters__":
-        # Preserve current sn_query so disambiguation samples from current result set
-        sn_sess = dict(st.session_state.sn_session or {})
-        sn_sess["accumulated_entities"] = {}
-        sn_sess["force_disambiguate"] = True
-        sn_sess.pop("awaiting", None)
-        sn_sess.pop("pending_action", None)
-        st.session_state.sn_session = sn_sess
-        result = process_message("__refine_filters__")
-        handle_result(result)
         st.rerun()
     elif pending == "__cancel_sn_action__":
         if st.session_state.sn_session:

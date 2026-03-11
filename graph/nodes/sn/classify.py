@@ -253,6 +253,17 @@ EXAMPLES:
   sn_query: "assignment_group.nameLIKENetwork"
   sn_orderby: "ORDERBYDESCopened_at"
 
+- "show latest P3 incidents" / "P3 incidents newest first"
+  sn_query: "priority=3"
+  sn_orderby: "ORDERBYDESCopened_at"
+  Do NOT add time_range for "latest" — it means sort order only.
+
+- "Find incidents assigned to Software team" / "assigned to X team"
+  sn_query: "assignment_group.nameLIKESoftware"
+  sn_orderby: "ORDERBYDESCopened_at"
+  Use assignment_group.nameLIKE (not assigned_to) when user mentions a team name.
+  Use the core team name for LIKE (e.g. "Software" not "Software team") so it matches.
+
 ─── ACTIVE FILTERS FROM PRIOR TURNS ───
 If active_filters is not empty, the user is refining a previous query.
 You MUST incorporate all active filters into sn_query alongside any new
@@ -293,6 +304,12 @@ def sn_classify_node(state):
     """Layer 1: Classify intent + extract entities + generate SN query via LLM."""
     question = state["question"]
     session = dict(state.get("sn_session") or {})
+
+    # ── Fast-path: refine filters (from incident list "Refine filters" button) ───────
+    if session.get("force_disambiguate"):
+        session["sn_intent"] = "fetch_incidents"
+        session["_turn_entities"] = {}
+        return {"sn_session": session, "steps": ["sn_classify:refine_filters"]}
 
     # ── Fast-path: awaiting follow-up (e.g. parent INC when linking, priority for escalate) ───────
     awaiting = session.get("awaiting")

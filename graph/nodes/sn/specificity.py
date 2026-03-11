@@ -25,7 +25,7 @@ DIMENSION_WEIGHTS: dict[str, float] = {
     "category":     0.15,
     "keywords":     0.15,
     "sort_by":      0.10,
-    "assignee":     0.10,
+    "assignee":     0.20,  # Bumped so "assigned to X team" goes to execute, not disambiguate
 }
 
 LOW_THRESHOLD = 0.15
@@ -48,6 +48,14 @@ def sn_score_node(state):
     entities = session.get("accumulated_entities", {})
     sn_intent = session.get("sn_intent", "")
     round_count = session.get("disambiguation_count", 0)
+
+    # Refine filters: force disambiguation to show filter pills (priority, state, etc.)
+    if session.pop("force_disambiguate", False):
+        session["sn_action"] = "disambiguate"
+        return {
+            "sn_session": session,
+            "steps": ["sn_score:refine_filters→disambiguate"],
+        }
 
     score = _compute_score(entities)
     session["specificity_score"] = score

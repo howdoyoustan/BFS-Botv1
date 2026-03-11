@@ -25,7 +25,14 @@ def intent_router_node(state):
             "steps": ["intent:SERVICENOW_INCIDENT(followup)"],
         }
 
-    # 3. Normal rule-based classification
+    # 3. Refine filters: user clicked "Refine filters" on incident list
+    if sn_session and sn_session.get("force_disambiguate"):
+        return {
+            "intent": "SERVICENOW_INCIDENT",
+            "steps": ["intent:SERVICENOW_INCIDENT(refine)"],
+        }
+
+    # 4. Normal rule-based classification
     query = state["question"]
     intent = classify_intent_rule_based(query)
 
