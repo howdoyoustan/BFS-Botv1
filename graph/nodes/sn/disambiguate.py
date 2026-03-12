@@ -44,10 +44,19 @@ def sn_disambiguate_node(state):
     except Exception:
         counts = {"total": 0}
 
+    # Fallback: if current filters return 0, sample from all incidents so user can still refine
+    total = counts.get("total", 0)
+    used_fallback = False
+    if total == 0 and base_query:
+        try:
+            counts = client.sample_dimensions("")
+            total = counts.get("total", 0)
+            used_fallback = total > 0
+        except Exception:
+            pass
+
     session["dimension_counts"] = counts
     session["disambiguation_count"] = session.get("disambiguation_count", 0) + 1
-
-    total = counts.get("total", 0)
 
     if total == 0:
         sn_response = {
@@ -67,9 +76,14 @@ def sn_disambiguate_node(state):
             if active_parts:
                 active_text = f"  \nActive filters: {', '.join(active_parts)}"
 
+        if used_fallback:
+            intro = f"Your current filters returned no incidents. Here are options from **all {total}** incidents to narrow down:"
+        else:
+            intro = f"I found **{total}** incidents.{active_text}"
+
         sn_response = {
             "type": "disambiguation",
-            "text": f"I found **{total}** incidents.{active_text}",
+            "text": intro,
             "filters": filter_groups,
             "metrics": {"total": total},
         }
@@ -111,7 +125,7 @@ def _build_filter_groups(counts: dict, entities: dict) -> list[dict]:
                 "dimension_label": DIMENSION_LABELS.get(dim, dim),
                 "options": options,
             })
-        if len(groups) >= 3:
+        if len(groups) >= 4:
             break
 
     return groups

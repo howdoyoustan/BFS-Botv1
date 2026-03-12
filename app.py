@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import tempfile
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -97,50 +98,6 @@ with st.sidebar:
 
     st.divider()
 
-    st.subheader("Quick Start")
-    st.caption("Use one-click prompts to navigate common triage workflows.")
-
-    if st.button("🔎 Show open P1/P2 incidents", width="stretch"):
-        queue_user_prompt("Show me all open P1 and P2 incidents")
-    if st.button("🧾 Lookup incident by number", width="stretch"):
-        queue_user_prompt("Show details for INC0010001")
-    if st.button("📚 Ask SOP question", width="stretch"):
-        queue_user_prompt("What SOP should I follow for a VPN outage?")
-
-    st.divider()
-
-    st.subheader("Session Status")
-    phase_labels = {
-        None: "Idle",
-        "showing_filters": "Filtering incidents",
-        "showing_list": "Reviewing incident list",
-        "showing_detail": "Viewing incident details",
-        "awaiting_confirmation": "Waiting for action confirmation",
-    }
-    st.caption(f"Current SN phase: **{phase_labels.get(st.session_state.sn_ui_phase, 'Idle')}**")
-    st.caption(f"Messages in chat: **{len(st.session_state.messages)}**")
-
-    st.divider()
-
-    st.subheader("Current Context")
-    current_incident = _get_current_incident_context()
-    sn_sess = st.session_state.get("sn_session") or {}
-    pending_action = sn_sess.get("pending_action") or {}
-    if current_incident:
-        st.caption(f"Incident: **{current_incident}**")
-    else:
-        st.caption("Incident: _None selected yet_")
-
-    if pending_action.get("type"):
-        st.caption(f"Pending action: **{pending_action['type']}**")
-    else:
-        st.caption("Pending action: _None_")
-
-    if sn_sess.get("awaiting"):
-        st.caption(f"Awaiting: **{sn_sess['awaiting']}**")
-
-    st.divider()
-
     st.subheader("Intent Override")
     selected_label = st.selectbox(
         "Choose an intent or let the router decide",
@@ -154,6 +111,36 @@ with st.sidebar:
         st.info(f"Forcing intent: **{intent_override}**")
     else:
         st.caption("The intent router will classify your query automatically.")
+
+    st.divider()
+
+    st.subheader("Session Status")
+    phase_labels = {
+        None: "Idle",
+        "showing_filters": "Filtering incidents",
+        "showing_list": "Reviewing incident list",
+        "showing_detail": "Viewing incident details",
+        "awaiting_confirmation": "Waiting for action confirmation",
+    }
+    st.markdown(
+        f"**Current SN phase:** {phase_labels.get(st.session_state.sn_ui_phase, 'Idle')}  \n"
+        f"**Messages in chat:** {len(st.session_state.messages)}"
+    )
+
+    st.divider()
+
+    st.subheader("Current Context")
+    current_incident = _get_current_incident_context()
+    sn_sess = st.session_state.get("sn_session") or {}
+    pending_action = sn_sess.get("pending_action") or {}
+    incident_text = current_incident or "_None selected yet_"
+    pending_text = pending_action.get("type") or "_None_"
+    awaiting_text = sn_sess.get("awaiting") or "_None_"
+    st.markdown(
+        f"**Incident:** {incident_text}  \n"
+        f"**Pending action:** {pending_text}  \n"
+        f"**Awaiting:** {awaiting_text}"
+    )
 
     st.divider()
 
@@ -319,6 +306,18 @@ def _render_disambiguation(response: dict, msg_idx: int):
 
     filter_groups = response.get("filters", [])
     if not filter_groups:
+        st.caption("Try broader filters or start over:")
+        cols = st.columns(2)
+        with cols[0]:
+            if st.button("Try broader filters", key=f"refine_disambig_empty_{msg_idx}", width="stretch"):
+                queue_user_prompt("Try broader filters", pending_payload="__refine_filters_all__")
+        with cols[1]:
+            if st.button("Start over", key=f"start_over_disambig_empty_{msg_idx}", width="stretch"):
+                st.session_state.messages = []
+                st.session_state.sn_session = None
+                st.session_state.sn_ui_phase = None
+                st.session_state._pending_synthetic = None
+                st.rerun()
         return
 
     st.markdown("**To narrow this down, pick a filter:**")
@@ -337,12 +336,14 @@ def _render_disambiguation(response: dict, msg_idx: int):
             match_idx = labels.index(selected)
             raw_value = options[match_idx]["value"]
             dim_prefix, val = raw_value.split(":", 1)
+            pri_match = re.search(r"\b([1-5])\b", val)
+            pri_num = pri_match.group(1) if pri_match else val
             friendly = {
-                "priority": f"priority {val} incidents",
-                "state": f"{val} incidents",
+                "priority": f"show incidents with priority {pri_num}",
+                "state": f"show incidents with state {val}",
                 "time": f"incidents from {val.replace('_', ' ')}",
-                "category": f"{val} incidents",
-                "assignee": f"incidents assigned to {val}",
+                "category": f"show incidents in category {val}",
+                "assignee": f"show incidents assigned to assignment group {val}",
             }
             inject_selection(friendly.get(dim_prefix, val))
 
@@ -365,6 +366,18 @@ def _render_incident_list(response: dict, msg_idx: int):
 
     if not incidents:
         st.info("No incidents found matching your filters.")
+        st.caption("Try different filters or start over:")
+        ncols = st.columns(2)
+        with ncols[0]:
+            if st.button("Try different filters", key=f"refine_empty_{msg_idx}", width="stretch"):
+                queue_user_prompt("Try different filters", pending_payload=f"__refine_filters__:{msg_idx}")
+        with ncols[1]:
+            if st.button("Start over", key=f"restart_empty_{msg_idx}", width="stretch"):
+                st.session_state.messages = []
+                st.session_state.sn_session = None
+                st.session_state.sn_ui_phase = None
+                st.session_state._pending_synthetic = None
+                st.rerun()
         return
 
     st.markdown(response.get("text", ""))
@@ -417,7 +430,7 @@ def _render_incident_list(response: dict, msg_idx: int):
     rcols = st.columns(3)
     with rcols[0]:
         if st.button("Refine filters", key=f"refine_{msg_idx}", width="stretch"):
-            queue_user_prompt("Refine filters", pending_payload="__refine_filters__")
+            queue_user_prompt("Refine filters", pending_payload=f"__refine_filters__:{msg_idx}")
     with rcols[1]:
         if st.button("Not about incidents", key=f"not_inc_{msg_idx}", width="stretch"):
             st.session_state.sn_session = None
@@ -760,9 +773,14 @@ if not st.session_state.messages:
         starter_prompts = [
             "Show me open P1 and P2 incidents",
             "Show details for INC0010699",
-            "Find incidents assigned to Data Engineering",
+            "Find incidents assigned to assignment group Data Engineering",
+            "Find incidents assigned to John Smith",
+            "Find incidents in category Network",
+            "Find incidents in subcategory VPN",
+            "Find incidents from caller Fred Luddy",
+            "Find incidents assigned to Data Engineering in category Network",
             "Add a work note to INC0010699",
-            "What SOP should I follow for a VPN outage?",
+            "What SOP should I follow for Airflow outage?",
         ]
 
         for row_start in range(0, len(starter_prompts), 2):
@@ -863,6 +881,11 @@ def handle_result(result: dict):
     }
     if sn_response:
         msg_data["sn_response"] = sn_response
+        # Store sn_query so Refine filters can use it (session may change after later turns)
+        resp_type = sn_response.get("type", "")
+        if resp_type in ("incident_list", "incident_stats"):
+            sn_sess = result.get("sn_session") or {}
+            msg_data["sn_query"] = sn_sess.get("sn_query", "")
 
     st.session_state.messages.append(msg_data)
 
@@ -886,9 +909,29 @@ if pending:
         st.session_state.messages.append(msg_data)
         st.session_state.sn_ui_phase = "showing_detail"
         st.rerun()
-    elif pending == "__refine_filters__":
-        # Preserve current sn_query so disambiguation samples from current result set
+    elif pending.startswith("__refine_filters__:"):
+        # Use sn_query from the message that has the incident list (session may have changed)
+        msg_idx_str = pending.split(":", 1)[1]
+        try:
+            msg_idx = int(msg_idx_str)
+            msg = st.session_state.messages[msg_idx] if msg_idx < len(st.session_state.messages) else {}
+            base_query = msg.get("sn_query", "")
+        except (ValueError, IndexError):
+            base_query = ""
         sn_sess = dict(st.session_state.sn_session or {})
+        sn_sess["sn_query"] = base_query or sn_sess.get("sn_query", "")
+        sn_sess["accumulated_entities"] = {}
+        sn_sess["force_disambiguate"] = True
+        sn_sess.pop("awaiting", None)
+        sn_sess.pop("pending_action", None)
+        st.session_state.sn_session = sn_sess
+        result = process_message("__refine_filters__")
+        handle_result(result)
+        st.rerun()
+    elif pending == "__refine_filters_all__":
+        # Force a broad disambiguation sample from all incidents.
+        sn_sess = dict(st.session_state.sn_session or {})
+        sn_sess["sn_query"] = ""
         sn_sess["accumulated_entities"] = {}
         sn_sess["force_disambiguate"] = True
         sn_sess.pop("awaiting", None)

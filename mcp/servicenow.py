@@ -1,8 +1,113 @@
 import os
+import re
 import requests
 from collections import Counter
 from typing import Optional
 from dotenv import load_dotenv
+
+
+def _sanitize_query_spaces(query: str) -> str:
+    """Wrap unquoted LIKE values containing spaces in single quotes (ServiceNow requirement)."""
+    if not query:
+        return query
+    for pattern in [
+        r"(assignment_group\.nameLIKE)([^'^]+?)(?=\^|$)",
+        r"(assigned_to\.nameLIKE)([^'^]+?)(?=\^|$)",
+        r"(caller_id\.nameLIKE)([^'^]+?)(?=\^|$)",
+    ]:
+        def repl(m):
+            val = m.group(2).strip()
+            if val and " " in val and not (val.startswith("'") and val.endswith("'")):
+                return m.group(1) + "'" + val + "'"
+            return m.group(0)
+
+        query = re.sub(pattern, repl, query)
+    return query
+
+
+def _strip_outer_quotes(value: str) -> str:
+    value = (value or "").strip()
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+        return value[1:-1].strip()
+    return value
+
+
+def _normalize_name(value: str) -> str:
+    value = _strip_outer_quotes(value).lower()
+    # Normalize separators so "Data-Engineering" and "Data Engineering" rank similarly.
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _choose_best_name_match(results: list[dict], target: str, name_field: str = "name") -> Optional[str]:
+    """Pick the best candidate sys_id from lookup results using simple name ranking."""
+    if not results:
+        return None
+
+    target_norm = _normalize_name(target)
+    if not target_norm:
+        return None
+
+    scored: list[tuple[int, str]] = []
+    for row in results:
+        raw_name = row.get(name_field) or ""
+        if isinstance(raw_name, dict):
+            raw_name = raw_name.get("display_value", raw_name.get("value", ""))
+        name_norm = _normalize_name(str(raw_name))
+        if not name_norm:
+            continue
+
+        if name_norm == target_norm:
+            score = 100
+        elif name_norm.startswith(target_norm):
+            score = 80
+        elif target_norm in name_norm:
+            score = 60
+        else:
+            # Lightweight token overlap ranking for fuzzy team names.
+            target_tokens = set(target_norm.split())
+            name_tokens = set(name_norm.split())
+            overlap = len(target_tokens & name_tokens)
+            if overlap == 0:
+                continue
+            score = 40 + overlap
+
+        sys_id = row.get("sys_id")
+        if sys_id:
+            scored.append((score, sys_id))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1]
+
+
+def _resolve_assignment_group_in_query(client, query: str) -> str:
+    """
+    Replace assignment_group.nameLIKE'X' with assignment_group=sys_id.
+    Uses exact sys_id match instead of nameLIKE to avoid encoding/quoting issues with spaces.
+    """
+    if not query:
+        return query
+    # Match: assignment_group.nameLIKE'Data Engineering' or assignment_group.nameLIKEData Engineering
+    pattern = r"assignment_group\.nameLIKE(?:'([^']*)'|([^'^]+?))(?=\^|$)"
+    parts = []
+    last_end = 0
+    for m in re.finditer(pattern, query):
+        parts.append(query[last_end : m.start()])
+        grp_name = _strip_outer_quotes((m.group(1) or m.group(2) or "").strip())
+        if grp_name:
+            sid = client.get_group_sys_id(grp_name)
+            if sid:
+                parts.append(f"assignment_group={sid}")
+            else:
+                parts.append(m.group(0))  # keep original if lookup fails
+        else:
+            parts.append(m.group(0))
+        last_end = m.end()
+    parts.append(query[last_end:])
+    return "".join(parts)
 
 load_dotenv(override=True)
 
@@ -141,6 +246,8 @@ class ServiceNowClient:
         Run a raw ServiceNow encoded query (for structured filters
         like priority>3, state=6, etc.).
         """
+        query = _sanitize_query_spaces(query)
+        query = _resolve_assignment_group_in_query(self, query)
         if query:
             full_query = f"{query}^{orderby}"
         else:
@@ -169,7 +276,9 @@ class ServiceNowClient:
             "sysparm_suppress_pagination_header": "false",
         }
         if query:
-            params["sysparm_query"] = query
+            q = _sanitize_query_spaces(query)
+            q = _resolve_assignment_group_in_query(self, q)
+            params["sysparm_query"] = q
         resp = self._get("/api/now/table/incident", params)
         total = resp.headers.get("X-Total-Count")
         if total is not None:
@@ -181,7 +290,9 @@ class ServiceNowClient:
                 "sysparm_display_value": "true",
             }
             if query:
-                stats_params["sysparm_query"] = query
+                q = _sanitize_query_spaces(query)
+                q = _resolve_assignment_group_in_query(self, q)
+                stats_params["sysparm_query"] = q
             stats_resp = self._get("/api/now/stats/incident", stats_params)
             stats_data = stats_resp.json().get("result", {})
             count_val = stats_data.get("stats", {}).get("count")
@@ -233,31 +344,50 @@ class ServiceNowClient:
         return self.update_incident(child_sys_id, {"parent_incident": parent_sys_id})
 
     def get_user_sys_id(self, user_name: str) -> Optional[str]:
-        """Look up user sys_id by user_name (LIKE match)."""
+        """
+        Look up user sys_id by username or display name.
+        Uses ranked matching so natural-language assignee filters resolve better.
+        """
+        raw = _strip_outer_quotes(user_name)
+        if not raw:
+            return None
+
+        # Query both username and display name; then rank candidates.
+        query = f"user_nameLIKE{raw}^ORnameLIKE{raw}"
         params = {
-            "sysparm_query": f"user_nameLIKE{user_name}",
-            "sysparm_fields": "sys_id",
-            "sysparm_limit": 1,
+            "sysparm_query": query,
+            "sysparm_fields": "sys_id,name,user_name",
+            "sysparm_limit": 20,
         }
         try:
             resp = self._get("/api/now/table/sys_user", params)
             results = resp.json().get("result", [])
-            return results[0]["sys_id"] if results else None
+            # Prefer exact/closest display-name match; fall back to username field.
+            sid = _choose_best_name_match(results, raw, name_field="name")
+            if sid:
+                return sid
+            sid = _choose_best_name_match(results, raw, name_field="user_name")
+            return sid
         except Exception:
             return None
 
     def get_group_sys_id(self, group_name: str) -> Optional[str]:
-        """Look up group sys_id by name (LIKE match)."""
-        escaped = group_name.replace("^", "^^").replace(":", "^:")
+        """
+        Look up group sys_id by name with ranking.
+        Avoids over-constraining to a bad first LIKE hit.
+        """
+        escaped = _strip_outer_quotes(group_name).replace("^", "^^").replace(":", "^:")
+        if not escaped:
+            return None
         params = {
             "sysparm_query": f"nameLIKE{escaped}",
-            "sysparm_fields": "sys_id",
-            "sysparm_limit": 1,
+            "sysparm_fields": "sys_id,name",
+            "sysparm_limit": 20,
         }
         try:
             resp = self._get("/api/now/table/sys_user_group", params)
             results = resp.json().get("result", [])
-            return results[0]["sys_id"] if results else None
+            return _choose_best_name_match(results, escaped, name_field="name")
         except Exception:
             return None
 
@@ -338,7 +468,9 @@ class ServiceNowClient:
           }
         """
         params = {
-            "sysparm_query": base_query or "ORDERBYDESCopened_at",
+            "sysparm_query": _resolve_assignment_group_in_query(
+                self, _sanitize_query_spaces(base_query) or ""
+            ) or "ORDERBYDESCopened_at",
             "sysparm_display_value": "true",
             "sysparm_fields": ",".join(self.SAMPLE_FIELDS),
             "sysparm_limit": sample_limit,
@@ -346,10 +478,18 @@ class ServiceNowClient:
         resp = self._get("/api/now/table/incident", params)
         rows = resp.json().get("result", [])
 
+        def _display_val(val):
+            """Extract display string from ServiceNow ref/choice field (can be str or dict)."""
+            if val is None:
+                return ""
+            if isinstance(val, dict):
+                return val.get("display_value", val.get("value", "")) or ""
+            return str(val) if val else ""
+
         counts: dict = {"total": len(rows)}
         for field in ("priority", "state", "category", "assignment_group"):
             counter = Counter(
-                r.get(field, "") for r in rows if r.get(field)
+                _display_val(r.get(field)) for r in rows if _display_val(r.get(field))
             )
             counts[field] = dict(counter.most_common(8))
 
@@ -376,10 +516,12 @@ class ServiceNowClient:
 
         for row in rows:
             opened = row.get("opened_at", "")
+            if isinstance(opened, dict):
+                opened = opened.get("display_value", opened.get("value", ""))
             if not opened:
                 continue
             try:
-                dt = datetime.strptime(opened[:19], "%Y-%m-%d %H:%M:%S")
+                dt = datetime.strptime(str(opened)[:19], "%Y-%m-%d %H:%M:%S")
             except ValueError:
                 try:
                     dt = datetime.strptime(opened[:10], "%Y-%m-%d")

@@ -1,7 +1,0 @@
-# Minimal deps for ServiceNow SN module
-langchain-core
-langchain-openai>=0.3.9
-langgraph>=0.3.18
-python-dotenv>=1.0.1
-requests>=2.32.3
-pydantic

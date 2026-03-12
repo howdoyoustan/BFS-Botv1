@@ -13,6 +13,9 @@ Handles three response shapes:
 
 from collections import Counter
 
+from mcp.servicenow import ServiceNowClient
+from graph.nodes.sn.disambiguate import _build_filter_groups
+
 
 def sn_generate_node(state):
     """Build structured response from retrieved incidents."""
@@ -25,6 +28,36 @@ def sn_generate_node(state):
         if state.get("generation", "").startswith("ServiceNow API error"):
             return {"steps": ["sn_generate:api_error"]}
 
+        # Match disambiguation UX: when strict filters yield nothing, offer
+        # refinement options sampled from the broader incident population.
+        entities = session.get("accumulated_entities", {})
+        fallback_counts = {"total": 0}
+        try:
+            fallback_counts = ServiceNowClient().sample_dimensions("")
+        except Exception:
+            pass
+
+        fallback_total = fallback_counts.get("total", 0)
+        if fallback_total > 0:
+            filter_groups = _build_filter_groups(fallback_counts, entities)
+            sn_response = {
+                "type": "disambiguation",
+                "text": (
+                    f"Your current filters returned no incidents. Here are options from "
+                    f"all **{fallback_total}** incidents to narrow down:"
+                ),
+                "filters": filter_groups,
+                "metrics": {"total": fallback_total},
+            }
+            session["dimension_counts"] = fallback_counts
+            session["disambiguation_count"] = session.get("disambiguation_count", 0) + 1
+            return {
+                "generation": sn_response["text"],
+                "sn_response": sn_response,
+                "sn_session": session,
+                "steps": ["sn_generate:no_incidents:fallback_disambiguation"],
+            }
+
         sn_response = {
             "type": "incident_list",
             "text": "No incidents found matching your filters.",
@@ -34,6 +67,7 @@ def sn_generate_node(state):
         return {
             "generation": sn_response["text"],
             "sn_response": sn_response,
+            "sn_session": session,
             "steps": ["sn_generate:no_incidents"],
         }
 

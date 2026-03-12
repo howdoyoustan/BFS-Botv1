@@ -56,11 +56,11 @@ class SNClassification(BaseModel):
     )
     category: Optional[str] = Field(
         default=None,
-        description="Incident category (e.g. network, software, hardware, inquiry, database)"
+        description="Incident category ONLY when user explicitly says 'category X' or 'in category X'. Do NOT use for 'assigned to X'."
     )
     assignee: Optional[str] = Field(
         default=None,
-        description="Person or team name if the user mentions assignment"
+        description="Team or person name ONLY when user explicitly says 'assigned to X' or 'assignment group X'. Do NOT use for 'category X'."
     )
     keywords: Optional[List[str]] = Field(
         default=None,
@@ -155,6 +155,16 @@ COUNT/STATS QUERIES:
 
 Only include entity fields the user actually mentioned. Leave others null.
 
+ASSIGNMENT vs CATEGORY — use ONLY the filter the user explicitly mentions:
+- "assigned to X" / "assigned to X team" / "assignment group X" / "assigned to Data Engineering"
+  → assignee = X, sn_query uses assignment_group.nameLIKE. Do NOT set category.
+- "category X" / "X category" / "in category X" / "category Software"
+  → category = X, sn_query uses category. Do NOT set assignee.
+- "Data Engineering" in "assigned to Data Engineering" = assignment group (assignee), NOT category.
+- "Software" in "assigned to Software team" = assignment group (assignee), NOT category.
+- Same name can exist as both category and assignment group — the user's phrasing determines which:
+  "assigned to" or "assignment group" → assignee only. "category" → category only.
+
 ─── SERVICENOW QUERY SYNTAX REFERENCE ───
 
 You must generate a valid ServiceNow encoded query string in the sn_query field.
@@ -177,6 +187,11 @@ display name you MUST use dot-walking with ".name":
 - caller_id.name      (caller name: use LIKE)   caller_id.nameLIKEFred Luddy
 - assignment_group.name (group name: use LIKE)   assignment_group.nameLIKENetwork
 NEVER query these fields without ".name" — e.g. caller_id=Fred Luddy WILL NOT WORK.
+
+VALUES WITH SPACES — wrap in single quotes or the query will fail:
+- assignment_group.nameLIKE'Data Engineering'   (correct)
+- assignment_group.nameLIKEData Engineering      (WRONG — space breaks parsing)
+- assigned_to.nameLIKE'John Smith'                (correct)
 
 OPERATORS:
 - =    exact match          priority=1
@@ -261,8 +276,24 @@ EXAMPLES:
 - "Find incidents assigned to Software team" / "assigned to X team"
   sn_query: "assignment_group.nameLIKESoftware"
   sn_orderby: "ORDERBYDESCopened_at"
-  Use assignment_group.nameLIKE (not assigned_to) when user mentions a team name.
-  Use the core team name for LIKE (e.g. "Software" not "Software team") so it matches.
+
+- "Find incidents assigned to Data Engineering" / "assigned to X" (team names)
+  assignee: "Data Engineering", category: null
+  sn_query: "assignment_group.nameLIKE'Data Engineering'"
+  sn_orderby: "ORDERBYDESCopened_at"
+  Use assignment_group.nameLIKE (NOT category). ALWAYS wrap values with spaces in single quotes.
+
+- "incidents in category Software" / "Software category"
+  category: "Software", assignee: null
+  sn_query: "category=Software"
+  sn_orderby: "ORDERBYDESCopened_at"
+  Use category (NOT assignment_group) when user says "category".
+
+- "P1 incidents assigned to Data Engineering in category Network" (both explicitly mentioned)
+  assignee: "Data Engineering", category: "Network", priorities: [1]
+  sn_query: "priority=1^assignment_group.nameLIKE'Data Engineering'^category=Network"
+  sn_orderby: "ORDERBYDESCopened_at"
+  Only add BOTH when user explicitly mentions BOTH assignment AND category.
 
 ─── ACTIVE FILTERS FROM PRIOR TURNS ───
 If active_filters is not empty, the user is refining a previous query.
@@ -296,6 +327,121 @@ def _is_action_response(text: str) -> str | None:
     if lower in _CANCEL_TOKENS:
         return "cancel"
     return None
+
+
+def _quote_if_needed(value: str) -> str:
+    value = value.strip()
+    if " " in value and not (value.startswith("'") and value.endswith("'")):
+        return f"'{value}'"
+    return value
+
+
+def _trim_attr_value(raw: str) -> str:
+    """
+    Trim trailing query context from an extracted attribute value.
+    Example: "Data Engineering in category Network" -> "Data Engineering".
+    """
+    value = re.sub(
+        r"\s+(?:in\s+category|category|from|last|today|yesterday|where|with\s+state|with\s+priority|and\s+state|and\s+priority)\b.*$",
+        "",
+        raw.strip(),
+        flags=re.IGNORECASE,
+    )
+    return value.strip(" .,:;")
+
+
+def _extract_explicit_attr_filters(question: str) -> dict:
+    """
+    Deterministically extract explicit natural-language filters.
+    This acts as a safety net when LLM extraction/query composition drifts.
+    """
+    text = question.strip()
+    out: dict[str, str] = {}
+
+    category_match = re.search(r"\b(?:in\s+)?category\s+(.+)$", text, re.IGNORECASE)
+    if category_match:
+        val = _trim_attr_value(category_match.group(1))
+        if val:
+            out["category"] = val
+
+    # Prefer explicit "assignment group" wording.
+    group_match = re.search(r"\bassignment\s+group\s+(.+)$", text, re.IGNORECASE)
+    if group_match:
+        val = _trim_attr_value(group_match.group(1))
+        if val:
+            out["assignee"] = val
+            out["assignee_mode"] = "group"
+    else:
+        assigned_match = re.search(r"\bassigned\s+to\s+(.+)$", text, re.IGNORECASE)
+        if assigned_match:
+            val = _trim_attr_value(assigned_match.group(1))
+            if val:
+                out["assignee"] = val
+                # If query says "team/group", bias to assignment_group; otherwise allow person-style assignment.
+                if re.search(r"\b(team|group)\b", val, re.IGNORECASE):
+                    out["assignee_mode"] = "group"
+                else:
+                    out["assignee_mode"] = "auto"
+
+    return out
+
+
+def _upsert_query_clause(query: str, clause: str, remove_prefixes: list[str]) -> str:
+    parts = [p for p in (query or "").split("^") if p]
+    cleaned = [p for p in parts if not any(p.startswith(prefix) for prefix in remove_prefixes)]
+    if clause:
+        cleaned.append(clause)
+    return "^".join(cleaned)
+
+
+def _apply_attribute_query_overrides(question: str, extracted: dict, sn_query: str) -> tuple[dict, str]:
+    explicit = _extract_explicit_attr_filters(question)
+    if not explicit:
+        return extracted, sn_query
+
+    updated = dict(extracted)
+    query = sn_query or ""
+
+    has_explicit_category = "category" in explicit
+    has_explicit_assignee = "assignee" in explicit
+
+    if has_explicit_category:
+        category_val = explicit["category"]
+        updated["category"] = category_val
+        category_clause = f"categoryLIKE{_quote_if_needed(category_val)}"
+        query = _upsert_query_clause(
+            query,
+            category_clause,
+            remove_prefixes=["category=", "categoryLIKE"],
+        )
+
+    if has_explicit_assignee:
+        assignee_val = explicit["assignee"]
+        assignee_mode = explicit.get("assignee_mode", "auto")
+        updated["assignee"] = assignee_val
+
+        # Keep assignment-group filtering as default for team/group requests.
+        if assignee_mode == "group":
+            assignee_clause = f"assignment_group.nameLIKE{_quote_if_needed(assignee_val)}"
+            remove_prefixes = ["assignment_group.nameLIKE", "assignment_group=", "assigned_to.nameLIKE"]
+        elif assignee_mode == "auto":
+            # For plain "assigned to X", default to assignment_group for team-like phrasing
+            # while still preserving a model-provided assigned_to clause if present elsewhere.
+            assignee_clause = f"assignment_group.nameLIKE{_quote_if_needed(assignee_val)}"
+            remove_prefixes = ["assignment_group.nameLIKE", "assignment_group="]
+        else:
+            assignee_clause = f"assigned_to.nameLIKE{_quote_if_needed(assignee_val)}"
+            remove_prefixes = ["assigned_to.nameLIKE"]
+
+        query = _upsert_query_clause(query, assignee_clause, remove_prefixes=remove_prefixes)
+
+        # If user did not explicitly request category, prevent accidental cross-binding
+        # where a team name is interpreted as category.
+        if not has_explicit_category and updated.get("category"):
+            updated.pop("category", None)
+            query = _upsert_query_clause(query, "", remove_prefixes=["category=", "categoryLIKE"])
+
+    return updated, query
 
 
 # ── Node ─────────────────────────────────────────────────────────────
@@ -402,9 +548,15 @@ def sn_classify_node(state):
     if result.limit is not None:
         extracted["limit"] = result.limit
 
+    extracted, final_query = _apply_attribute_query_overrides(
+        question=question,
+        extracted=extracted,
+        sn_query=result.sn_query or "",
+    )
+
     session["sn_intent"] = result.intent
     session["_turn_entities"] = extracted
-    session["sn_query"] = result.sn_query or ""
+    session["sn_query"] = final_query
     session["sn_orderby"] = result.sn_orderby or "ORDERBYDESCopened_at"
 
     return {
@@ -412,6 +564,6 @@ def sn_classify_node(state):
         "steps": [
             f"sn_classify:intent={result.intent}",
             f"sn_classify:entities={list(extracted.keys())}",
-            f"sn_classify:sn_query={result.sn_query or '(empty)'}",
+            f"sn_classify:sn_query={final_query or '(empty)'}",
         ],
     }
